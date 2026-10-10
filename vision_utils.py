@@ -12,7 +12,9 @@ import numpy as np
 import streamlit as st
 from ultralytics import YOLO
 
+import os
 import time
+import urllib.request
 import threading
 import smtplib
 from email.message import EmailMessage
@@ -21,8 +23,20 @@ from email.message import EmailMessage
 def load_yolo_model():
     return YOLO("yolov8n.pt")
 
+_ZOO = "https://raw.githubusercontent.com/opencv/opencv_zoo/main/models/"
+_MODELS = {
+    "face_detection_yunet_2023mar.onnx": _ZOO + "face_detection_yunet/face_detection_yunet_2023mar.onnx",
+    "face_recognition_sface_2021dec.onnx": _ZOO + "face_recognition_sface/face_recognition_sface_2021dec.onnx",
+}
+
+def _ensure_models():
+    for name, url in _MODELS.items():
+        if not os.path.exists(name):
+            urllib.request.urlretrieve(url, name)
+
 @st.cache_resource
 def load_face_model():
+    _ensure_models()
 
     detector = cv2.FaceDetectorYN.create(
                                          "face_detection_yunet_2023mar.onnx",

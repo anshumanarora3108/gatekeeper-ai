@@ -7,12 +7,20 @@ Original file is located at
     https://colab.research.google.com/drive/12GatURjuk865lvPvLcf5S_hrktHtBilw
 """
 
+import os
 import streamlit as st
 import cv2
 import numpy as np
 from PIL import Image
 from streamlit_drawable_canvas import st_canvas
 from vision_utils import load_yolo_model, load_face_model, encode_face, trigger_intruder_alert
+
+def _cfg(key):
+    """Read a secret from Streamlit secrets or environment variables."""
+    try:
+        return st.secrets[key]
+    except Exception:
+        return os.environ.get(key)
 
 st.set_page_config(page_title="GateKeeper AI", layout="wide")
 st.title("🛡️ GateKeeper AI: Enterprise Security")
@@ -61,12 +69,11 @@ with tab1:
 # ==========================================
 with tab2:
     st.header("Draw the Restricted Perimeter")
-    st.write("Draw a rectangle over the camera feed to define the secure zone.")
-    cap = cv2.VideoCapture(0)
-    ret, frame = cap.read()
-    cap.release()
+    st.write("Take a snapshot from your camera, then draw a rectangle over it to define the secure zone.")
+    snap = st.camera_input("Camera snapshot", key="zone_cam")
 
-    if ret:
+    if snap is not None:
+        frame = cv2.imdecode(np.frombuffer(snap.getvalue(), np.uint8), 1)
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         bg_image = Image.fromarray(frame_rgb)
         canvas_result = st_canvas(
@@ -88,8 +95,6 @@ with tab2:
                 [x1, y1], [x2, y1], [x2, y2], [x1, y2]
             ], dtype=np.int32)
             st.success("Zone saved successfully!")
-    else:
-        st.error("Could not access camera for zone setup.")
 
 # ==========================================
 # TAB 3: LIVE MONITOR
@@ -99,88 +104,61 @@ with tab3:
     if st.session_state.restricted_zone is None:
         st.warning("Please setup the restricted zone in Tab 2 first!")
     else:
-        run_camera = st.checkbox("Start Live Monitoring")
-        frame_window = st.image([])
+        shot = st.camera_input("Take a snapshot to check the zone", key="monitor_cam")
 
-        if run_camera:
-            cap = cv2.VideoCapture(0)
-            frame_count = 0
-            cached_name = "UNKNOWN"
+        if shot is not None:
+            frame = cv2.imdecode(np.frombuffer(shot.getvalue(), np.uint8), 1)
+            zone = st.session_state.restricted_zone
+            cv2.polylines(frame, [zone], True, (0, 255, 255), 2)
+            results = model(frame, imgsz=320, verbose=False)
 
-            while run_camera:
-                ret, frame = cap.read()
-                if not ret:
-                    st.error("Failed to grab frame.")
-                    break
+            for result in results:
+                for box in result.boxes:
+                    if int(box.cls[0]) == 0 and float(box.conf[0]) > 0.5:
+                        x1, y1, x2, y2 = map(int, box.xyxy[0])
+                        h, w, _ = frame.shape
+                        x1, y1 = max(0, x1), max(0, y1)
+                        x2, y2 = min(w, x2), min(h, y2)
+                        foot_point = (int((x1 + x2) / 2), y2)
+                        is_inside = cv2.pointPolygonTest(zone, foot_point, False) >= 0
 
-                frame_count += 1
-                cv2.polylines(frame, [st.session_state.restricted_zone], True, (0, 255, 255), 2)
+                        label = "Person"
+                        box_color = (255, 0, 0)
 
-                results = model(frame, imgsz=320, stream=True, verbose=False)
+                        if is_inside:
+                            head_bottom = y1 + max(1, int((y2 - y1) * 0.5))
+                            face_crop = frame[y1:head_bottom, x1:x2]
+                            matched_name = "UNKNOWN"
 
-                for result in results:
-                    for box in result.boxes:
-                        if int(box.cls[0]) == 0 and float(box.conf[0]) > 0.5:
-                            x1, y1, x2, y2 = map(int, box.xyxy[0])
+                            if face_crop.size > 0 and face_crop.shape[0] > 20 and face_crop.shape[1] > 20:
+                                crop_h, crop_w, _ = face_crop.shape
+                                detector.setInputSize((crop_w, crop_h))
+                                _, faces = detector.detect(face_crop)
 
-                            h, w, _ = frame.shape
-                            x1, y1 = max(0, x1), max(0, y1)
-                            x2, y2 = min(w, x2), min(h, y2)
-                            foot_point = (int((x1 + x2) / 2), y2)
+                                if faces is not None and len(faces) > 0:
+                                    aligned_face = recognizer.alignCrop(face_crop, faces[0])
+                                    face_feature = recognizer.feature(aligned_face)
+                                    best_score = 0
+                                    for idx, known_feat in enumerate(st.session_state.known_encodings):
+                                        score = recognizer.match(known_feat, face_feature, cv2.FaceRecognizerSF_FR_COSINE)
+                                        if score >= 0.363 and score > best_score:
+                                            best_score = score
+                                            matched_name = st.session_state.known_names[idx]
 
-                            is_inside = cv2.pointPolygonTest(st.session_state.restricted_zone, foot_point, False) >= 0
+                            if matched_name == "UNKNOWN":
+                                label = "INTRUDER"
+                                box_color = (0, 0, 255)
+                                cv2.putText(frame, "BREACH DETECTED", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+                                st.error("🚨 Breach detected: unauthorized person in the restricted zone.")
+                                sender, pw, receiver = _cfg("ALERT_SENDER"), _cfg("ALERT_APP_PASSWORD"), _cfg("ALERT_RECEIVER")
+                                if sender and pw and receiver:
+                                    trigger_intruder_alert(sender=sender, app_password=pw, receiver=receiver)
+                            else:
+                                label = f"Authorized: {matched_name}"
+                                box_color = (0, 255, 0)
 
-                            label = "Person"
-                            box_color = (255, 0, 0)
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 2)
+                        cv2.circle(frame, foot_point, 5, box_color, -1)
+                        cv2.putText(frame, label, (x1, max(20, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, box_color, 2)
 
-                            if is_inside:
-                                if frame_count % 5 == 0:
-                                    head_bottom = y1 + max(1, int((y2 - y1) * 0.5))
-                                    face_crop = frame[y1:head_bottom, x1:x2]
-                                    matched_name = "UNKNOWN"
-
-                                    if face_crop.size > 0 and face_crop.shape[0] > 20 and face_crop.shape[1] > 20:
-                                        crop_h, crop_w, _ = face_crop.shape
-                                        detector.setInputSize((crop_w, crop_h))
-                                        _, faces = detector.detect(face_crop)
-
-                                        if faces is not None and len(faces) > 0:
-                                            aligned_face = recognizer.alignCrop(face_crop, faces[0])
-                                            face_feature = recognizer.feature(aligned_face)
-
-                                            best_score = 0
-                                            best_match_idx = -1
-
-                                            for idx, known_feat in enumerate(st.session_state.known_encodings):
-                                                score = recognizer.match(known_feat, face_feature, cv2.FaceRecognizerSF_FR_COSINE)
-                                                if score >= 0.363 and score > best_score:
-                                                    best_score = score
-                                                    best_match_idx = idx
-
-                                            if best_match_idx != -1:
-                                                matched_name = st.session_state.known_names[best_match_idx]
-
-                                    cached_name = matched_name
-
-                                if cached_name == "UNKNOWN":
-                                    label = "🚨 INTRUDER"
-                                    box_color = (0, 0, 255)
-                                    cv2.putText(frame, "BREACH DETECTED", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
-
-                                    trigger_intruder_alert(
-                                                           sender="sandeepsandeep3198059@gmail.com",
-                                                           app_password="plnntyaownmyoslf",
-                                                           receiver="vikassinghpcgd@gmail.com"
-                                                           )
-                                else:
-                                    label = f"✅ Authorized: {cached_name}"
-                                    box_color = (0, 255, 0)
-
-                            cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 2)
-                            cv2.circle(frame, foot_point, 5, box_color, -1)
-                            cv2.putText(frame, label, (x1, max(20, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, box_color, 2)
-
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                frame_window.image(frame, channels="RGB")
-
-            cap.release()
+            st.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), channels="RGB")

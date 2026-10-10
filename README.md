@@ -64,3 +64,19 @@ streamlit run demo_app.py
    * 🟦 **Blue Box:** Person outside the perimeter (Safe).
    * 🟩 **Green Box:** Authorized personnel verified inside the perimeter.
    * 🟥 **Red Box:** Unauthorized intruder breach (triggers alert banner and email notification).
+
+
+## ☁️ Public Deployment (Streamlit Community Cloud)
+
+This app uses Streamlit, PyTorch and OpenCV, so it can't run on Vercel's serverless platform. Deploy it for free on [Streamlit Community Cloud](https://share.streamlit.io):
+
+1. Push this repo to GitHub, then choose **New app** and pick `demo_app.py`.
+2. Under **Advanced settings → Secrets**, paste (see `.streamlit/secrets.toml.example`):
+   ```toml
+   ALERT_SENDER = "sender@gmail.com"
+   ALERT_APP_PASSWORD = "gmail-app-password"
+   ALERT_RECEIVER = "receiver@gmail.com"
+   ```
+3. Deploy. ONNX model weights download automatically on first run.
+
+Note: the deployed version analyzes camera snapshots from your browser (`st.camera_input`) rather than a server-side webcam.
